@@ -340,6 +340,13 @@ class Config:
     # VISION_PROVIDER_PRIORITY: comma-separated provider order for Vision fallback.
     vision_provider_priority: str = "gemini,anthropic,openai"
 
+
+    # === Dify AI 配置（新增）===
+    dify_base_url: Optional[str] = None  # Dify API 地址，如: https://ai.huajiantong.com
+    dify_api_key: Optional[str] = None   # Dify API Key，如: app-UcPpSmPkSL9ghleOegUTpJZh
+    dify_conversation_id: Optional[str] = None  # 会话ID（可选，用于多轮对话）
+    dify_user_id: Optional[str] = "stock-analyzer"  # 用户标识
+
     # === 搜索引擎配置（支持多 Key 负载均衡）===
     bocha_api_keys: List[str] = field(default_factory=list)  # Bocha API Keys
     minimax_api_keys: List[str] = field(default_factory=list)  # MiniMax API Keys
@@ -923,6 +930,10 @@ class Config:
                 or ""
             ),
             vision_provider_priority=os.getenv('VISION_PROVIDER_PRIORITY', 'gemini,anthropic,openai'),
+            dify_base_url=os.getenv('DIFY_BASE_URL'),
+            dify_api_key=os.getenv('DIFY_API_KEY'),
+            dify_conversation_id=os.getenv('DIFY_CONVERSATION_ID'),
+            dify_user_id=os.getenv('DIFY_USER_ID', 'stock-analyzer'),
             bocha_api_keys=bocha_api_keys,
             minimax_api_keys=minimax_api_keys,
             tavily_api_keys=tavily_api_keys,

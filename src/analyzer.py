@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
 
 import litellm
+import requests
 from json_repair import repair_json
 from litellm import Router
 
@@ -35,6 +36,163 @@ from src.data.stock_mapping import STOCK_NAME_MAP
 from src.schemas.report_schema import AnalysisReportSchema
 
 logger = logging.getLogger(__name__)
+
+class DifyChatClient:
+    """Dify AI Chat API Client - 支持流式响应"""
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        user_id: str = "stock-analyzer",
+        conversation_id: Optional[str] = None,
+        timeout: int = 120,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.user_id = user_id
+        self.conversation_id = conversation_id
+        self.timeout = timeout
+
+    def chat(
+        self,
+        message: str,
+        inputs: Optional[Dict[str, Any]] = None,
+        response_mode: str = "streaming",
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        发送聊天消息并获取响应
+
+        Args:
+            message: 用户消息
+            inputs: 可选的输入参数
+            response_mode: 响应模式 (streaming/blocking)
+
+        Returns:
+            Tuple of (response_text, metadata)
+        """
+        url = f"{self.base_url}/chat-messages"
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "inputs": inputs or {},
+            "query": message,
+            "response_mode": response_mode,
+            "conversation_id": self.conversation_id,
+            "user": self.user_id,
+            "files": [],
+        }
+
+        try:
+            if response_mode == "streaming":
+                return self._chat_streaming(url, headers, payload)
+            else:
+                return self._chat_blocking(url, headers, payload)
+        except requests.exceptions.Timeout:
+            raise Exception(f"Dify API timeout after {self.timeout}s")
+        except requests.exceptions.ConnectionError as e:
+            raise Exception(f"Dify API connection error: {e}")
+        except Exception as e:
+            raise Exception(f"Dify API error: {e}")
+
+    def _chat_streaming(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+    ) -> Tuple[str, Dict[str, Any]]:
+        """处理流式响应"""
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=self.timeout,
+            stream=True,
+        )
+        response.raise_for_status()
+
+        full_answer = []
+        metadata = {
+            "conversation_id": None,
+            "message_id": None,
+            "usage": None,
+        }
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+
+            line_str = line.decode("utf-8")
+
+            # 处理 SSE 格式
+            if line_str.startswith("data:"):
+                data_str = line_str[5:].strip()
+
+                # 流结束标记
+                if data_str == "[DONE]":
+                    break
+
+                try:
+                    data = json.loads(data_str)
+                    event = data.get("event")
+
+                    if event == "message":
+                        # 累积消息内容
+                        answer = data.get("answer", "")
+                        if answer:
+                            full_answer.append(answer)
+
+                        # 更新元数据
+                        if data.get("conversation_id"):
+                            metadata["conversation_id"] = data["conversation_id"]
+                        if data.get("message_id"):
+                            metadata["message_id"] = data["message_id"]
+
+                    elif event == "message_end":
+                        # 消息结束，获取使用量
+                        metadata["usage"] = data.get("metadata", {}).get("usage")
+                        if data.get("conversation_id"):
+                            metadata["conversation_id"] = data["conversation_id"]
+                        if data.get("message_id"):
+                            metadata["message_id"] = data["message_id"]
+
+                except json.JSONDecodeError:
+                    continue
+
+        return "".join(full_answer), metadata
+
+    def _chat_blocking(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+    ) -> Tuple[str, Dict[str, Any]]:
+        """处理阻塞式响应"""
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+
+        data = response.json()
+
+        metadata = {
+            "conversation_id": data.get("conversation_id"),
+            "message_id": data.get("id"),
+            "usage": data.get("metadata", {}).get("usage") if data.get("metadata") else None,
+        }
+
+        return data.get("answer", ""), metadata
+
+    def is_available(self) -> bool:
+        """检查 Dify 客户端是否配置完整"""
+        return bool(self.base_url and self.api_key)
 
 
 def check_content_integrity(result: "AnalysisResult") -> Tuple[bool, List[str]]:
@@ -697,10 +855,45 @@ class GeminiAnalyzer:
         """
         self._router = None
         self._litellm_available = False
+        self._dify_client: Optional[DifyChatClient] = None
+        self._dify_available = False
+
+        # 初始化 Dify 客户端（如果配置了）
+        self._init_dify()
+
         self._init_litellm()
+
         if not self._litellm_available:
             logger.warning("No LLM configured (LITELLM_MODEL / API keys), AI analysis will be unavailable")
 
+    def _init_dify(self) -> None:
+        """Initialize Dify Chat Client if configured."""
+        config = get_config()
+
+        # 检查 Dify 配置
+        if not config.dify_base_url or not config.dify_api_key:
+            logger.debug("Dify not configured (dify_base_url / dify_api_key missing)")
+            return
+
+        try:
+            self._dify_client = DifyChatClient(
+                base_url=config.dify_base_url,
+                api_key=config.dify_api_key,
+                user_id=config.dify_user_id or "stock-analyzer",
+                conversation_id=config.dify_conversation_id,
+                timeout=120,
+            )
+            self._dify_available = self._dify_client.is_available()
+
+            if self._dify_available:
+                logger.info(
+                    f"Analyzer LLM: Dify initialized ({config.dify_base_url}, "
+                    f"user={config.dify_user_id or 'stock-analyzer'})"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to initialize Dify client: {e}")
+            self._dify_client = None
+            self._dify_available = False
     def _has_channel_config(self, config: Config) -> bool:
         """Check if multi-channel config (channels / YAML / legacy model_list) is active."""
         return bool(config.llm_model_list) and not all(
@@ -770,7 +963,7 @@ class GeminiAnalyzer:
 
     def is_available(self) -> bool:
         """Check if LiteLLM is properly configured with at least one API key."""
-        return self._router is not None or self._litellm_available
+        return self._dify_available or self._router is not None or self._litellm_available
 
     def _call_litellm(self, prompt: str, generation_config: dict) -> Tuple[str, str, Dict[str, Any]]:
         """Call LLM via litellm with fallback across configured models.
@@ -789,6 +982,39 @@ class GeminiAnalyzer:
             name and usage is a dict with prompt_tokens, completion_tokens, total_tokens.
         """
         config = get_config()
+        # ========== 优先尝试 Dify ==========
+        if self._dify_available and self._dify_client:
+            try:
+                logger.info("[LLM] Trying Dify API...")
+
+                # Dify 使用完整的 prompt（包含 system prompt）
+                full_prompt = f"{self.SYSTEM_PROMPT}\n\n{prompt}"
+
+                response_text, metadata = self._dify_client.chat(
+                    message=full_prompt,
+                    response_mode="streaming",
+                )
+
+                if response_text:
+                    # 构造 usage 信息（Dify 可能不返回 token 使用量）
+                    usage: Dict[str, Any] = {
+                        "prompt_tokens": metadata.get("usage", {}).get("prompt_tokens", 0) if metadata.get("usage") else 0,
+                        "completion_tokens": metadata.get("usage", {}).get("completion_tokens", 0) if metadata.get("usage") else 0,
+                        "total_tokens": metadata.get("usage", {}).get("total_tokens", 0) if metadata.get("usage") else 0,
+                    }
+
+                    # 更新 conversation_id 以便保持会话
+                    if metadata.get("conversation_id"):
+                        self._dify_client.conversation_id = metadata["conversation_id"]
+
+                    logger.info(f"[LLM] Dify response successful, length={len(response_text)}")
+                    return (response_text, "dify", usage)
+
+            except Exception as e:
+                logger.warning(f"[Dify] API call failed: {e}, falling back to LiteLLM")
+                # 继续执行 LiteLLM 逻辑
+
+        # ========== 降级到 LiteLLM ==========
         max_tokens = (
             generation_config.get('max_output_tokens')
             or generation_config.get('max_tokens')
