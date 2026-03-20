@@ -894,6 +894,7 @@ class GeminiAnalyzer:
             logger.warning(f"Failed to initialize Dify client: {e}")
             self._dify_client = None
             self._dify_available = False
+
     def _has_channel_config(self, config: Config) -> bool:
         """Check if multi-channel config (channels / YAML / legacy model_list) is active."""
         return bool(config.llm_model_list) and not all(
@@ -987,8 +988,8 @@ class GeminiAnalyzer:
             try:
                 logger.info("[LLM] Trying Dify API...")
 
-                # Dify 使用完整的 prompt（包含 system prompt）
-                full_prompt = f"{self.SYSTEM_PROMPT}\n\n{prompt}"
+                # Dify 不需要完整的 prompt，提示词已经在智能体指定
+                full_prompt = f"{prompt}"
 
                 response_text, metadata = self._dify_client.chat(
                     message=full_prompt,
