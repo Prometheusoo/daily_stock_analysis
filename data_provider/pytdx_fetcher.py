@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from typing import Optional, Generator, List, Tuple
 
 import pandas as pd
+from pytdx.util.best_ip import select_best_ip
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -62,6 +63,10 @@ def _parse_hosts_from_env() -> Optional[List[Tuple[str, int]]]:
             return result
 
     host = os.getenv("PYTDX_HOST", "").strip()
+    if not host:
+        best = select_best_ip()
+        if best:
+            return [best]
     port_str = os.getenv("PYTDX_PORT", "").strip()
     if host and port_str:
         try:
@@ -448,22 +453,22 @@ class PytdxFetcher(BaseFetcher):
 if __name__ == "__main__":
     # 测试代码
     logging.basicConfig(level=logging.DEBUG)
-    
+
     fetcher = PytdxFetcher()
-    
+
     try:
         # 测试历史数据
         df = fetcher.get_daily_data('600519')  # 茅台
         print(f"获取成功，共 {len(df)} 条数据")
         print(df.tail())
-        
+
         # 测试股票名称
         name = fetcher.get_stock_name('600519')
         print(f"股票名称: {name}")
-        
+
         # 测试实时行情
         quote = fetcher.get_realtime_quote('600519')
         print(f"实时行情: {quote}")
-        
+
     except Exception as e:
         print(f"获取失败: {e}")
